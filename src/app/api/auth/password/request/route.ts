@@ -1,7 +1,8 @@
 import crypto from "node:crypto";
 import { NextRequest } from "next/server";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { User, PasswordReset } from "@/models/auth";
 import { requestResetSchema } from "@/lib/validators";
 
 const RESET_TOKEN_EXPIRY_MINUTES = 60;
@@ -14,9 +15,9 @@ export async function POST(request: NextRequest) {
       return errorResponse(parsed.error.flatten().formErrors.join(", ") || "Invalid input", 422);
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email: parsed.data.email.toLowerCase() },
-    });
+    await dbConnect();
+
+    const user = await User.findOne({ email: parsed.data.email.toLowerCase() });
 
     if (!user) {
       return jsonResponse({ success: true });
@@ -25,12 +26,11 @@ export async function POST(request: NextRequest) {
     const token = crypto.randomBytes(32).toString("hex");
     const expires = new Date(Date.now() + RESET_TOKEN_EXPIRY_MINUTES * 60 * 1000);
 
-    await prisma.passwordReset.create({
-      data: {
-        token,
-        userId: user.id,
-        expires,
-      },
+    // Upsert equivalent in Mongoose? Or just create given simple structure.
+    await PasswordReset.create({
+      token,
+      userId: user._id,
+      expires,
     });
 
     const resetUrl = `${process.env.APP_URL ?? "http://localhost:3000"}/reset-password?token=${token}`;

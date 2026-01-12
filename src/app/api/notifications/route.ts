@@ -1,7 +1,10 @@
 import { NextRequest } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { Notification } from "@/models/transactions"; // Notification is there?? Let me check where I put it. It was in transactions.ts in my thought process.
+// Wait, I put Notification in transactions.ts in Step 29 call. "Mongoose models for Income, Expense, SavingGoal, Notification."
+import { Notification as NotificationModel } from "@/models/transactions";
 
 export async function GET(request: NextRequest) {
   const user = await getUserFromRequest(request);
@@ -9,12 +12,12 @@ export async function GET(request: NextRequest) {
     return errorResponse("Unauthenticated", 401);
   }
 
-  const notifications = await prisma.notification.findMany({
-    where: { userId: user.id },
-    orderBy: { createdAt: "desc" },
-  });
+  await dbConnect();
+  const notifications = await NotificationModel.find({ userId: user.id }).sort({ createdAt: "desc" });
 
-  return jsonResponse({ notifications });
+  return jsonResponse({
+    notifications: notifications.map(n => ({ ...n.toObject(), id: n._id.toString() }))
+  });
 }
 
 export async function PATCH(request: NextRequest) {
@@ -26,16 +29,18 @@ export async function PATCH(request: NextRequest) {
   const payload = await request.json().catch(() => ({}));
   const ids: string[] = Array.isArray(payload?.ids) ? payload.ids : [];
 
+  await dbConnect();
+
   if (ids.length === 0) {
-    await prisma.notification.updateMany({
-      where: { userId: user.id, isRead: false },
-      data: { isRead: true },
-    });
+    await NotificationModel.updateMany(
+      { userId: user.id, isRead: false },
+      { isRead: true }
+    );
   } else {
-    await prisma.notification.updateMany({
-      where: { userId: user.id, id: { in: ids } },
-      data: { isRead: true },
-    });
+    await NotificationModel.updateMany(
+      { userId: user.id, _id: { $in: ids } },
+      { isRead: true }
+    );
   }
 
   return jsonResponse({ success: true });

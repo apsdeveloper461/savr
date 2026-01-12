@@ -1,8 +1,11 @@
 import { NextRequest } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { BankAccount, Category } from "@/models/core";
+import { Expense } from "@/models/transactions";
 import { expenseSchema } from "@/lib/validators";
+import mongoose from "mongoose";
 
 export async function GET(request: NextRequest) {
   const user = await getUserFromRequest(request);
@@ -14,24 +17,31 @@ export async function GET(request: NextRequest) {
   const startParam = searchParams.get("start");
   const endParam = searchParams.get("end");
 
-  const where = {
-    userId: user.id,
-    date: {
-      gte: startParam ? new Date(startParam) : undefined,
-      lte: endParam ? new Date(endParam) : undefined,
-    },
-  } as const;
+  const query: any = { userId: user.id };
 
-  const expenses = await prisma.expense.findMany({
-    where,
-    include: {
-      account: true,
-      category: true,
-    },
-    orderBy: { date: "desc" },
+  if (startParam || endParam) {
+    query.date = {};
+    if (startParam) query.date.$gte = new Date(startParam);
+    if (endParam) query.date.$lte = new Date(endParam);
+  }
+
+  await dbConnect();
+
+  const expenses = await Expense.find(query)
+    .populate('accountId')
+    .populate('categoryId')
+    .sort({ date: "desc" });
+
+  return jsonResponse({
+    expenses: expenses.map(e => ({
+      ...e.toObject(),
+      id: e._id.toString(),
+      account: e.accountId ? { ...e.accountId.toObject(), id: e.accountId._id.toString() } : null,
+      category: e.categoryId ? { ...e.categoryId.toObject(), id: e.categoryId._id.toString() } : null,
+      accountId: e.accountId?._id.toString(),
+      categoryId: e.categoryId?._id.toString()
+    }))
   });
-
-  return jsonResponse({ expenses });
 }
 
 export async function POST(request: NextRequest) {
@@ -47,19 +57,11 @@ export async function POST(request: NextRequest) {
   }
 
   const data = parsed.data;
+  await dbConnect();
+
   const [account, category] = await Promise.all([
-    prisma.bankAccount.findFirst({
-      where: {
-        id: data.accountId,
-        userId: user.id,
-      },
-    }),
-    prisma.category.findFirst({
-      where: {
-        id: data.categoryId,
-        userId: user.id,
-      },
-    }),
+    BankAccount.findOne({ _id: data.accountId, userId: user.id }),
+    Category.findOne({ _id: data.categoryId, userId: user.id }),
   ]);
 
   if (!account) {
@@ -70,28 +72,45 @@ export async function POST(request: NextRequest) {
     return errorResponse("Category not found", 400);
   }
 
-  const [expense] = await prisma.$transaction([
-    prisma.expense.create({
-      data: {
-        userId: user.id,
-        amount: data.amount,
-        description: data.description ?? null,
-        notes: data.notes ?? null,
-        merchant: data.merchant ?? null,
-        date: data.date,
-        categoryId: data.categoryId,
-        accountId: data.accountId,
-      },
-      include: {
-        account: true,
-        category: true,
-      },
-    }),
-    prisma.bankAccount.update({
-      where: { id: account.id },
-      data: { balance: { decrement: data.amount } },
-    }),
-  ]);
+  let session = null;
+  try {
+    session = await mongoose.startSession();
+    session.startTransaction();
 
-  return jsonResponse({ expense }, 201);
+    const [expense] = await Expense.create([{
+      userId: user.id,
+      amount: data.amount,
+      description: data.description ?? null,
+      notes: data.notes ?? null,
+      merchant: data.merchant ?? null,
+      date: data.date,
+      categoryId: data.categoryId,
+      accountId: data.accountId,
+    }], { session });
+
+    await BankAccount.findByIdAndUpdate(
+      account._id,
+      { $inc: { balance: -data.amount } }, // Decrement for expense
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    await expense.populate(['accountId', 'categoryId']);
+
+    return jsonResponse({
+      expense: {
+        ...expense.toObject(),
+        id: expense._id.toString(),
+        account: expense.accountId ? { ...expense.accountId.toObject(), id: expense.accountId._id.toString() } : null,
+        category: expense.categoryId ? { ...expense.categoryId.toObject(), id: expense.categoryId._id.toString() } : null,
+      }
+    }, 201);
+  } catch (error) {
+    if (session) await session.abortTransaction();
+    console.error("Expense creation error", error);
+    return errorResponse("Unable to create expense", 500);
+  } finally {
+    if (session) session.endSession();
+  }
 }

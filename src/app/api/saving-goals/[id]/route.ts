@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { SavingGoal } from "@/models/transactions";
 import { savingGoalSchema } from "@/lib/validators";
 
 export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
@@ -16,9 +17,10 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     return errorResponse(parsed.error.flatten().formErrors.join(", ") || "Invalid input", 422);
   }
 
-  const goal = await prisma.savingGoal.update({
-    where: { id: params.id, userId: user.id },
-    data: {
+  await dbConnect();
+  const goal = await SavingGoal.findOneAndUpdate(
+    { _id: params.id, userId: user.id },
+    {
       name: parsed.data.name ?? undefined,
       targetAmount: parsed.data.targetAmount ?? undefined,
       currentAmount: parsed.data.currentAmount ?? undefined,
@@ -28,9 +30,12 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
       color: parsed.data.color ?? undefined,
       isCompleted: parsed.data.isCompleted ?? undefined,
     },
-  });
+    { new: true }
+  );
 
-  return jsonResponse({ goal });
+  if (!goal) return errorResponse("Goal not found", 404);
+
+  return jsonResponse({ goal: { ...goal.toObject(), id: goal._id.toString() } });
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
@@ -39,6 +44,7 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
     return errorResponse("Unauthenticated", 401);
   }
 
-  await prisma.savingGoal.delete({ where: { id: params.id, userId: user.id } });
+  await dbConnect();
+  await SavingGoal.deleteOne({ _id: params.id, userId: user.id });
   return jsonResponse({ success: true });
 }

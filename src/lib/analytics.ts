@@ -1,86 +1,92 @@
 import { endOfMonth, endOfYear, startOfMonth, startOfYear, subMonths } from "date-fns";
-import { prisma } from "./prisma";
+import dbConnect from "@/lib/db";
+import { BankAccount as BankAccountModel, Category as CategoryModel } from "@/models/core";
+import { Income as IncomeModel, Expense as ExpenseModel, SavingGoal as SavingGoalModel } from "@/models/transactions";
+import mongoose from "mongoose";
 
-type SavingGoalRecord = Awaited<ReturnType<typeof prisma.savingGoal.findMany>>[number];
-type AccountRecord = Awaited<ReturnType<typeof prisma.bankAccount.findMany>>[number];
-type CategoryRecord = Awaited<ReturnType<typeof prisma.category.findMany>>[number];
+// Helper for aggregation sum
+async function getSum(model: any, userId: string, startDate?: Date, endDate?: Date) {
+  const match: any = { userId: new mongoose.Types.ObjectId(userId) }; // Ensure ObjectIDs match
+  if (startDate && endDate) {
+    match.date = { $gte: startDate, $lte: endDate };
+  } else if (startDate) {
+    match.date = { $gte: startDate };
+  } else if (endDate) {
+    match.date = { $lte: endDate };
+  }
+
+  const result = await model.aggregate([
+    { $match: match },
+    { $group: { _id: null, total: { $sum: "$amount" } } }
+  ]);
+  return result[0]?.total || 0;
+}
 
 export const getDashboardMetrics = async (userId: string) => {
+  await dbConnect();
+
   const now = new Date();
   const monthStart = startOfMonth(now);
   const monthEnd = endOfMonth(now);
   const yearStart = startOfYear(now);
   const yearEnd = endOfYear(now);
 
-  const [incomeTotal, expenseTotal, monthIncome, monthExpense, yearIncome, yearExpense, goals, accounts] =
-    await Promise.all([
-      prisma.income.aggregate({
-        where: { userId },
-        _sum: { amount: true },
-      }),
-      prisma.expense.aggregate({
-        where: { userId },
-        _sum: { amount: true },
-      }),
-      prisma.income.aggregate({
-        where: { userId, date: { gte: monthStart, lte: monthEnd } },
-        _sum: { amount: true },
-      }),
-      prisma.expense.aggregate({
-        where: { userId, date: { gte: monthStart, lte: monthEnd } },
-        _sum: { amount: true },
-      }),
-      prisma.income.aggregate({
-        where: { userId, date: { gte: yearStart, lte: yearEnd } },
-        _sum: { amount: true },
-      }),
-      prisma.expense.aggregate({
-        where: { userId, date: { gte: yearStart, lte: yearEnd } },
-        _sum: { amount: true },
-      }),
-      prisma.savingGoal.findMany({ where: { userId } }),
-      prisma.bankAccount.findMany({ where: { userId } }),
-    ]);
+  const [
+    incomeTotal,
+    expenseTotal,
+    monthIncome,
+    monthExpense,
+    yearIncome,
+    yearExpense,
+    goals,
+    accounts
+  ] = await Promise.all([
+    getSum(IncomeModel, userId),
+    getSum(ExpenseModel, userId),
+    getSum(IncomeModel, userId, monthStart, monthEnd),
+    getSum(ExpenseModel, userId, monthStart, monthEnd),
+    getSum(IncomeModel, userId, yearStart, yearEnd),
+    getSum(ExpenseModel, userId, yearStart, yearEnd),
+    SavingGoalModel.find({ userId }).lean(),
+    BankAccountModel.find({ userId }).lean(),
+  ]);
 
-  const totalIncome = incomeTotal._sum.amount ?? 0;
-  const totalExpenses = expenseTotal._sum.amount ?? 0;
-  const currentSavings = totalIncome - totalExpenses;
-
-  const monthlySavings = (monthIncome._sum.amount ?? 0) - (monthExpense._sum.amount ?? 0);
-  const yearlySavings = (yearIncome._sum.amount ?? 0) - (yearExpense._sum.amount ?? 0);
+  const currentSavings = incomeTotal - expenseTotal;
+  const monthlySavings = monthIncome - monthExpense;
+  const yearlySavings = yearIncome - yearExpense;
 
   const monthGoalAlert = goals
-    .filter((goal: SavingGoalRecord) => goal.type === "monthly")
-    .map((goal: SavingGoalRecord) => {
+    .filter((goal: any) => goal.type === "monthly")
+    .map((goal: any) => {
       const progress = goal.targetAmount
         ? Math.min(100, Math.round(((goal.currentAmount ?? 0) / goal.targetAmount) * 100))
         : 0;
       const atRisk = goal.targetAmount ? (goal.currentAmount ?? 0) < goal.targetAmount * 0.75 : false;
-      return { id: goal.id, name: goal.name, progress, atRisk };
+      return { id: goal._id.toString(), name: goal.name, progress, atRisk };
     });
 
   const lowBalanceAccounts = accounts
-    .filter((account: AccountRecord) => account.balance < 50)
-    .map((account: AccountRecord) => ({ id: account.id, name: account.name, balance: account.balance }));
+    .filter((account: any) => account.balance < 50)
+    .map((account: any) => ({ id: account._id.toString(), name: account.name, balance: account.balance }));
 
   return {
     totals: {
-      income: totalIncome,
-      expenses: totalExpenses,
+      income: incomeTotal,
+      expenses: expenseTotal,
       savings: currentSavings,
     },
     monthly: {
-      income: monthIncome._sum.amount ?? 0,
-      expenses: monthExpense._sum.amount ?? 0,
+      income: monthIncome,
+      expenses: monthExpense,
       savings: monthlySavings,
     },
     yearly: {
-      income: yearIncome._sum.amount ?? 0,
-      expenses: yearExpense._sum.amount ?? 0,
+      income: yearIncome,
+      expenses: yearExpense,
       savings: yearlySavings,
     },
-    goals: goals.map((goal: SavingGoalRecord) => ({
-      id: goal.id,
+    goals: goals.map((goal: any) => ({
+      id: goal._id.toString(),
       name: goal.name,
       targetAmount: goal.targetAmount,
       currentAmount: goal.currentAmount,
@@ -97,28 +103,32 @@ export const getDashboardMetrics = async (userId: string) => {
 };
 
 export const getCategoryBreakdown = async (userId: string, start: Date, end: Date) => {
-  const expenses = await prisma.expense.groupBy({
-    by: ["categoryId"],
-    where: { userId, date: { gte: start, lte: end } },
-    _sum: { amount: true },
-  });
-  type ExpenseGroup = (typeof expenses)[number];
+  await dbConnect();
 
-  const categories = await prisma.category.findMany({
-    where: {
-      userId,
-      id: {
-        in: expenses.map((item: ExpenseGroup) => item.categoryId),
-      },
+  const expenses = await ExpenseModel.aggregate([
+    {
+      $match: {
+        userId: new mongoose.Types.ObjectId(userId),
+        date: { $gte: start, $lte: end }
+      }
     },
-  });
+    {
+      $group: {
+        _id: "$categoryId",
+        amount: { $sum: "$amount" }
+      }
+    }
+  ]);
 
-  return expenses.map((item: ExpenseGroup) => {
-    const category = categories.find((c: CategoryRecord) => c.id === item.categoryId);
+  const categoryIds = expenses.map(e => e._id);
+  const categories = await CategoryModel.find({ _id: { $in: categoryIds } }).lean();
+
+  return expenses.map((item: any) => {
+    const category = categories.find((c: any) => c._id.toString() === item._id.toString());
     return {
-      id: item.categoryId,
+      id: item._id.toString(),
       name: category?.name ?? "Uncategorised",
-      amount: item._sum.amount ?? 0,
+      amount: item.amount || 0,
       icon: category?.icon ?? null,
       color: category?.color ?? null,
     };
@@ -126,32 +136,35 @@ export const getCategoryBreakdown = async (userId: string, start: Date, end: Dat
 };
 
 export const getIncomeVsExpenseTrend = async (userId: string, months = 6) => {
+  await dbConnect();
+
   const now = new Date();
   const start = startOfMonth(subMonths(now, months - 1));
 
+  // Efficient projection usage
   const [incomeEntries, expenseEntries] = await Promise.all([
-    prisma.income.findMany({
-      where: { userId, date: { gte: start, lte: now } },
-      select: { date: true, amount: true },
-    }),
-    prisma.expense.findMany({
-      where: { userId, date: { gte: start, lte: now } },
-      select: { date: true, amount: true },
-    }),
+    IncomeModel.find({
+      userId,
+      date: { $gte: start, $lte: now }
+    }).select('date amount').lean(),
+    ExpenseModel.find({
+      userId,
+      date: { $gte: start, $lte: now }
+    }).select('date amount').lean(),
   ]);
 
   const mapByMonth = (
     entries: Array<{ date: Date; amount: number }>,
   ) => {
     return entries.reduce<Record<string, number>>((accumulator, item) => {
-      const key = `${item.date.getFullYear()}-${item.date.getMonth() + 1}`;
+      const key = `${new Date(item.date).getFullYear()}-${new Date(item.date).getMonth() + 1}`;
       accumulator[key] = (accumulator[key] ?? 0) + item.amount;
       return accumulator;
     }, {});
   };
 
-  const incomeByMonth = mapByMonth(incomeEntries);
-  const expenseByMonth = mapByMonth(expenseEntries);
+  const incomeByMonth = mapByMonth(incomeEntries as any); // Type cast due to lean() return typical object
+  const expenseByMonth = mapByMonth(expenseEntries as any);
 
   const data = [] as Array<{ month: string; income: number; expense: number }>;
   for (let i = months - 1; i >= 0; i -= 1) {
@@ -172,27 +185,20 @@ export const getReportSummary = async (
   start: Date,
   end: Date,
 ) => {
-  const [income, expenses, goals] = await Promise.all([
-    prisma.income.aggregate({
-      where: { userId, date: { gte: start, lte: end } },
-      _sum: { amount: true },
-      _count: true,
-    }),
-    prisma.expense.aggregate({
-      where: { userId, date: { gte: start, lte: end } },
-      _sum: { amount: true },
-      _count: true,
-    }),
-    prisma.savingGoal.findMany({ where: { userId } }),
+  await dbConnect();
+
+  const [incomeSum, expenseSum, incomeCount, expenseCount, goals] = await Promise.all([
+    getSum(IncomeModel, userId, start, end),
+    getSum(ExpenseModel, userId, start, end),
+    IncomeModel.countDocuments({ userId, date: { $gte: start, $lte: end } }),
+    ExpenseModel.countDocuments({ userId, date: { $gte: start, $lte: end } }),
+    SavingGoalModel.find({ userId }).lean(),
   ]);
 
-  const totalIncome = income._sum.amount ?? 0;
-  const totalExpenses = expenses._sum.amount ?? 0;
-
   return {
-    income: { total: totalIncome, count: income._count },
-    expenses: { total: totalExpenses, count: expenses._count },
-    savings: totalIncome - totalExpenses,
-    goals,
+    income: { total: incomeSum, count: incomeCount },
+    expenses: { total: expenseSum, count: expenseCount },
+    savings: incomeSum - expenseSum,
+    goals: goals.map((g: any) => ({ ...g, id: g._id.toString() })),
   };
 };

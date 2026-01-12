@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { BankAccount } from "@/models/core";
 import { accountPayloadSchema } from "@/lib/validators";
 
 export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
@@ -17,28 +18,37 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
   }
 
   const data = parsed.data;
-  const account = await prisma.bankAccount.update({
-    where: { id: params.id, userId: user.id },
-    data: {
-      name: data.name ?? undefined,
-      type: data.type ?? undefined,
-      bankName: data.bankName ?? undefined,
-      accountNumber: data.accountNumber ?? undefined,
-      icon: data.icon ?? undefined,
-      color: data.color ?? undefined,
-      balance: data.balance ?? undefined,
-      isDefault: data.isDefault ?? undefined,
-    },
-  });
+  await dbConnect();
 
-  if (data.isDefault) {
-    await prisma.bankAccount.updateMany({
-      where: { userId: user.id, id: { not: account.id } },
-      data: { isDefault: false },
-    });
+  const account = await BankAccount.findOneAndUpdate(
+    { _id: params.id, userId: user.id },
+    {
+      $set: {
+        name: data.name ?? undefined,
+        type: data.type ?? undefined,
+        bankName: data.bankName ?? undefined,
+        accountNumber: data.accountNumber ?? undefined,
+        icon: data.icon ?? undefined,
+        color: data.color ?? undefined,
+        balance: data.balance ?? undefined,
+        isDefault: data.isDefault ?? undefined,
+      }
+    },
+    { new: true, runValidators: true }
+  );
+
+  if (!account) {
+    return errorResponse("Account not found", 404);
   }
 
-  return jsonResponse({ account });
+  if (data.isDefault) {
+    await BankAccount.updateMany(
+      { userId: user.id, _id: { $ne: account._id } },
+      { isDefault: false }
+    );
+  }
+
+  return jsonResponse({ account: { ...account.toObject(), id: account._id.toString() } });
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
@@ -47,9 +57,8 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
     return errorResponse("Unauthenticated", 401);
   }
 
-  await prisma.bankAccount.delete({
-    where: { id: params.id, userId: user.id },
-  });
+  await dbConnect();
+  await BankAccount.deleteOne({ _id: params.id, userId: user.id });
 
   return jsonResponse({ success: true });
 }

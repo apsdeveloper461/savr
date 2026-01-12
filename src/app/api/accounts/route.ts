@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { BankAccount } from "@/models/core";
 import { accountPayloadSchema } from "@/lib/validators";
 
 export async function GET(request: NextRequest) {
@@ -10,12 +11,12 @@ export async function GET(request: NextRequest) {
     return errorResponse("Unauthenticated", 401);
   }
 
-  const accounts = await prisma.bankAccount.findMany({
-    where: { userId: user.id },
-    orderBy: { createdAt: "asc" },
-  });
+  await dbConnect();
+  const accounts = await BankAccount.find({ userId: user.id }).sort({ createdAt: "asc" });
 
-  return jsonResponse({ accounts });
+  return jsonResponse({
+    accounts: accounts.map(a => ({ ...a.toObject(), id: a._id.toString() }))
+  });
 }
 
 export async function POST(request: NextRequest) {
@@ -32,26 +33,28 @@ export async function POST(request: NextRequest) {
 
   const data = parsed.data;
 
-  const account = await prisma.bankAccount.create({
-    data: {
-      userId: user.id,
-      name: data.name,
-      type: data.type,
-      bankName: data.bankName ?? null,
-      accountNumber: data.accountNumber ?? null,
-      icon: data.icon ?? null,
-      color: data.color ?? null,
-      balance: data.balance ?? 0,
-      isDefault: data.isDefault ?? false,
-    },
+  await dbConnect();
+
+  const account = await BankAccount.create({
+    userId: user.id,
+    name: data.name,
+    type: data.type,
+    bankName: data.bankName ?? null,
+    accountNumber: data.accountNumber ?? null,
+    icon: data.icon ?? null,
+    color: data.color ?? null,
+    balance: data.balance ?? 0,
+    isDefault: data.isDefault ?? false,
   });
 
   if (data.isDefault) {
-    await prisma.bankAccount.updateMany({
-      where: { userId: user.id, id: { not: account.id } },
-      data: { isDefault: false },
-    });
+    await BankAccount.updateMany(
+      { userId: user.id, _id: { $ne: account._id } },
+      { isDefault: false }
+    );
   }
 
-  return jsonResponse({ account }, 201);
+  return jsonResponse({
+    account: { ...account.toObject(), id: account._id.toString() }
+  }, 201);
 }

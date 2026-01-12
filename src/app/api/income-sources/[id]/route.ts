@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { IncomeSource } from "@/models/core";
 import { incomeSourceSchema } from "@/lib/validators";
 
 export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
@@ -16,16 +17,20 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     return errorResponse(parsed.error.flatten().formErrors.join(", ") || "Invalid input", 422);
   }
 
-  const source = await prisma.incomeSource.update({
-    where: { id: params.id, userId: user.id },
-    data: {
+  await dbConnect();
+  const source = await IncomeSource.findOneAndUpdate(
+    { _id: params.id, userId: user.id },
+    {
       name: parsed.data.name ?? undefined,
       icon: parsed.data.icon ?? undefined,
       color: parsed.data.color ?? undefined,
     },
-  });
+    { new: true }
+  );
 
-  return jsonResponse({ source });
+  if (!source) return errorResponse("Source not found", 404);
+
+  return jsonResponse({ source: { ...source.toObject(), id: source._id.toString() } });
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
@@ -34,6 +39,7 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
     return errorResponse("Unauthenticated", 401);
   }
 
-  await prisma.incomeSource.delete({ where: { id: params.id, userId: user.id } });
+  await dbConnect();
+  await IncomeSource.deleteOne({ _id: params.id, userId: user.id });
   return jsonResponse({ success: true });
 }

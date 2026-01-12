@@ -2,7 +2,8 @@ import { NextRequest } from "next/server";
 import { comparePassword } from "@/lib/crypto";
 import { errorResponse, jsonResponse } from "@/lib/http";
 import { signJwt } from "@/lib/jwt";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { User } from "@/models/auth";
 import { SESSION_COOKIE } from "@/lib/auth";
 import { loginSchema } from "@/lib/validators";
 
@@ -15,9 +16,9 @@ export async function POST(request: NextRequest) {
       return errorResponse(parsed.error.flatten().formErrors.join(", ") || "Invalid input", 422);
     }
 
-    const user = await prisma.user.findUnique({
-      where: { email: parsed.data.email.toLowerCase() },
-    });
+    await dbConnect();
+
+    const user = await User.findOne({ email: parsed.data.email.toLowerCase() });
 
     if (!user) {
       return errorResponse("Invalid credentials", 401);
@@ -30,7 +31,7 @@ export async function POST(request: NextRequest) {
     }
 
     const token = await signJwt({
-      sub: user.id,
+      sub: user._id.toString(),
       email: user.email,
       name: user.name,
       image: user.image,
@@ -38,7 +39,7 @@ export async function POST(request: NextRequest) {
 
     const response = jsonResponse({
       user: {
-        id: user.id,
+        id: user._id.toString(),
         email: user.email,
         name: user.name,
       },

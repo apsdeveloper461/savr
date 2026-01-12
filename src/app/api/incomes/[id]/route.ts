@@ -1,8 +1,11 @@
 import { NextRequest } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { BankAccount } from "@/models/core";
+import { Income, Expense } from "@/models/transactions";
 import { incomeSchema } from "@/lib/validators";
+import mongoose from "mongoose";
 
 export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
   const user = await getUserFromRequest(request);
@@ -10,9 +13,9 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     return errorResponse("Unauthenticated", 401);
   }
 
-  const existing = await prisma.income.findUnique({
-    where: { id: params.id, userId: user.id },
-  });
+  await dbConnect();
+
+  const existing = await Income.findOne({ _id: params.id, userId: user.id });
 
   if (!existing) {
     return errorResponse("Income not found", 404);
@@ -25,46 +28,77 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
   }
 
   const data = parsed.data;
-  const updated = await prisma.income.update({
-    where: { id: params.id },
-    data: {
-      amount: data.amount ?? undefined,
-      description: data.description ?? undefined,
-      notes: data.notes ?? undefined,
-      date: data.date ?? undefined,
-      sourceId: data.sourceId ?? undefined,
-      accountId: data.accountId ?? undefined,
-    },
-    include: {
-      account: true,
-      source: true,
-    },
-  });
+  let session = null;
+  let updatedIncome = null;
 
-  if (data.amount !== undefined || data.accountId !== undefined) {
-    const newAmount = data.amount ?? existing.amount;
-    const newAccountId = data.accountId ?? existing.accountId;
+  try {
+    session = await mongoose.startSession();
+    session.startTransaction();
 
-    const amountDiff = newAmount - existing.amount;
+    updatedIncome = await Income.findOneAndUpdate(
+      { _id: params.id },
+      {
+        amount: data.amount ?? undefined,
+        description: data.description ?? undefined,
+        notes: data.notes ?? undefined,
+        date: data.date ?? undefined,
+        sourceId: data.sourceId ?? undefined,
+        accountId: data.accountId ?? undefined,
+      },
+      { new: true, session }
+    );
 
-    if (existing.accountId !== newAccountId) {
-      await prisma.bankAccount.update({
-        where: { id: existing.accountId },
-        data: { balance: { decrement: existing.amount } },
-      });
-      await prisma.bankAccount.update({
-        where: { id: newAccountId },
-        data: { balance: { increment: newAmount } },
-      });
-    } else if (amountDiff !== 0) {
-      await prisma.bankAccount.update({
-        where: { id: newAccountId },
-        data: { balance: { increment: amountDiff } },
-      });
+    if (data.amount !== undefined || data.accountId !== undefined) {
+      const newAmount = data.amount ?? existing.amount;
+      const newAccountId = data.accountId ?? existing.accountId.toString();
+      const oldAccountId = existing.accountId.toString();
+
+      const amountDiff = newAmount - existing.amount;
+
+      if (oldAccountId !== newAccountId) {
+        // Reverse old transaction
+        await BankAccount.findByIdAndUpdate(
+          oldAccountId,
+          { $inc: { balance: -existing.amount } },
+          { session }
+        );
+        // Apply new transaction
+        await BankAccount.findByIdAndUpdate(
+          newAccountId,
+          { $inc: { balance: newAmount } },
+          { session }
+        );
+      } else if (amountDiff !== 0) {
+        // Same account, just diff
+        await BankAccount.findByIdAndUpdate(
+          newAccountId,
+          { $inc: { balance: amountDiff } },
+          { session }
+        );
+      }
     }
+
+    await session.commitTransaction();
+
+    // Populate for response
+    await updatedIncome.populate(['accountId', 'sourceId']);
+
+  } catch (error) {
+    if (session) await session.abortTransaction();
+    console.error("Income update error", error);
+    return errorResponse("Unable to update income", 500);
+  } finally {
+    if (session) session.endSession();
   }
 
-  return jsonResponse({ income: updated });
+  return jsonResponse({
+    income: {
+      ...updatedIncome.toObject(),
+      id: updatedIncome._id.toString(),
+      account: updatedIncome.accountId ? { ...updatedIncome.accountId.toObject(), id: updatedIncome.accountId._id.toString() } : null,
+      source: updatedIncome.sourceId ? { ...updatedIncome.sourceId.toObject(), id: updatedIncome.sourceId._id.toString() } : null,
+    }
+  });
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
@@ -73,19 +107,36 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
     return errorResponse("Unauthenticated", 401);
   }
 
-  const existing = await prisma.income.findUnique({
-    where: { id: params.id, userId: user.id },
-  });
+  await dbConnect();
 
-  if (!existing) {
-    return errorResponse("Income not found", 404);
+  let session = null;
+  try {
+    session = await mongoose.startSession();
+    session.startTransaction();
+
+    const existing = await Income.findOne({ _id: params.id, userId: user.id }).session(session);
+
+    if (!existing) {
+      await session.abortTransaction();
+      return errorResponse("Income not found", 404);
+    }
+
+    await Income.deleteOne({ _id: params.id }, { session });
+
+    await BankAccount.findByIdAndUpdate(
+      existing.accountId,
+      { $inc: { balance: -existing.amount } },
+      { session }
+    );
+
+    await session.commitTransaction();
+  } catch (error) {
+    if (session) await session.abortTransaction();
+    console.error("Income delete error", error);
+    return errorResponse("Unable to delete income", 500);
+  } finally {
+    if (session) session.endSession();
   }
-
-  await prisma.income.delete({ where: { id: params.id } });
-  await prisma.bankAccount.update({
-    where: { id: existing.accountId },
-    data: { balance: { decrement: existing.amount } },
-  });
 
   return jsonResponse({ success: true });
 }

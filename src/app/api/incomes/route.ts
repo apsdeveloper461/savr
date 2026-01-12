@@ -1,8 +1,11 @@
 import { NextRequest } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { BankAccount, IncomeSource } from "@/models/core";
+import { Income, Expense } from "@/models/transactions";
 import { incomeSchema } from "@/lib/validators";
+import mongoose from "mongoose";
 
 export async function GET(request: NextRequest) {
   const user = await getUserFromRequest(request);
@@ -14,24 +17,32 @@ export async function GET(request: NextRequest) {
   const startParam = searchParams.get("start");
   const endParam = searchParams.get("end");
 
-  const where = {
-    userId: user.id,
-    date: {
-      gte: startParam ? new Date(startParam) : undefined,
-      lte: endParam ? new Date(endParam) : undefined,
-    },
-  } as const;
+  const query: any = { userId: user.id };
 
-  const incomes = await prisma.income.findMany({
-    where,
-    include: {
-      account: true,
-      source: true,
-    },
-    orderBy: { date: "desc" },
+  if (startParam || endParam) {
+    query.date = {};
+    if (startParam) query.date.$gte = new Date(startParam);
+    if (endParam) query.date.$lte = new Date(endParam);
+  }
+
+  await dbConnect();
+
+  // Populate reference fields to match Prisma's "include"
+  const incomes = await Income.find(query)
+    .populate('accountId')
+    .populate('sourceId')
+    .sort({ date: "desc" });
+
+  return jsonResponse({
+    incomes: incomes.map(i => ({
+      ...i.toObject(),
+      id: i._id.toString(),
+      account: i.accountId ? { ...i.accountId.toObject(), id: i.accountId._id.toString() } : null,
+      source: i.sourceId ? { ...i.sourceId.toObject(), id: i.sourceId._id.toString() } : null,
+      accountId: i.accountId?._id.toString(), // Ensure IDs are strings
+      sourceId: i.sourceId?._id.toString()
+    }))
   });
-
-  return jsonResponse({ incomes });
 }
 
 export async function POST(request: NextRequest) {
@@ -47,19 +58,11 @@ export async function POST(request: NextRequest) {
   }
 
   const data = parsed.data;
+  await dbConnect();
+
   const [account, source] = await Promise.all([
-    prisma.bankAccount.findFirst({
-      where: {
-        id: data.accountId,
-        userId: user.id,
-      },
-    }),
-    prisma.incomeSource.findFirst({
-      where: {
-        id: data.sourceId,
-        userId: user.id,
-      },
-    }),
+    BankAccount.findOne({ _id: data.accountId, userId: user.id }),
+    IncomeSource.findOne({ _id: data.sourceId, userId: user.id }),
   ]);
 
   if (!account) {
@@ -70,27 +73,47 @@ export async function POST(request: NextRequest) {
     return errorResponse("Income source not found", 400);
   }
 
-  const [income] = await prisma.$transaction([
-    prisma.income.create({
-      data: {
-        userId: user.id,
-        amount: data.amount,
-        description: data.description ?? null,
-        notes: data.notes ?? null,
-        date: data.date,
-        sourceId: data.sourceId,
-        accountId: data.accountId,
-      },
-      include: {
-        account: true,
-        source: true,
-      },
-    }),
-    prisma.bankAccount.update({
-      where: { id: account.id },
-      data: { balance: { increment: data.amount } },
-    }),
-  ]);
+  // Use a session for transaction
+  let session = null;
+  try {
+    session = await mongoose.startSession();
+    session.startTransaction();
 
-  return jsonResponse({ income }, 201);
+    const [income] = await Income.create([{
+      userId: user.id,
+      amount: data.amount,
+      description: data.description ?? null,
+      notes: data.notes ?? null,
+      date: data.date,
+      sourceId: data.sourceId,
+      accountId: data.accountId,
+    }], { session });
+
+    await BankAccount.findByIdAndUpdate(
+      account._id,
+      { $inc: { balance: data.amount } },
+      { session }
+    );
+
+    await session.commitTransaction();
+
+    // Populate for response
+    await income.populate(['accountId', 'sourceId']);
+
+    return jsonResponse({
+      income: {
+        ...income.toObject(),
+        id: income._id.toString(),
+        account: income.accountId ? { ...income.accountId.toObject(), id: income.accountId._id.toString() } : null,
+        source: income.sourceId ? { ...income.sourceId.toObject(), id: income.sourceId._id.toString() } : null,
+      }
+    }, 201);
+  } catch (error) {
+    if (session) await session.abortTransaction();
+    console.error("Income creation error", error);
+    // Fallback? Or just fail.
+    return errorResponse("Unable to create income", 500);
+  } finally {
+    if (session) session.endSession();
+  }
 }

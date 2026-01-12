@@ -1,7 +1,8 @@
 import { NextRequest } from "next/server";
 import { getUserFromRequest } from "@/lib/auth";
 import { errorResponse, jsonResponse } from "@/lib/http";
-import { prisma } from "@/lib/prisma";
+import dbConnect from "@/lib/db";
+import { Category } from "@/models/core";
 import { categorySchema } from "@/lib/validators";
 
 export async function PATCH(request: NextRequest, { params }: { params: { id: string } }) {
@@ -16,17 +17,21 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     return errorResponse(parsed.error.flatten().formErrors.join(", ") || "Invalid input", 422);
   }
 
-  const category = await prisma.category.update({
-    where: { id: params.id, userId: user.id },
-    data: {
+  await dbConnect();
+  const category = await Category.findOneAndUpdate(
+    { _id: params.id, userId: user.id },
+    {
       name: parsed.data.name ?? undefined,
       icon: parsed.data.icon ?? undefined,
       color: parsed.data.color ?? undefined,
       budget: parsed.data.budget ?? undefined,
     },
-  });
+    { new: true }
+  );
 
-  return jsonResponse({ category });
+  if (!category) return errorResponse("Category not found", 404);
+
+  return jsonResponse({ category: { ...category.toObject(), id: category._id.toString() } });
 }
 
 export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
@@ -35,6 +40,7 @@ export async function DELETE(request: NextRequest, { params }: { params: { id: s
     return errorResponse("Unauthenticated", 401);
   }
 
-  await prisma.category.delete({ where: { id: params.id, userId: user.id } });
+  await dbConnect();
+  await Category.deleteOne({ _id: params.id, userId: user.id });
   return jsonResponse({ success: true });
 }
