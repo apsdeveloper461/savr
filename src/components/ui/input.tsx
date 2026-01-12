@@ -18,7 +18,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
         return (
             <div
                 className={cn(
-                    "flex items-center rounded-lg border border-zinc-200 bg-white dark:border-zinc-800",
+                    "flex items-center rounded-lg border border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-950",
                     className,
                 )}
             >
@@ -27,7 +27,7 @@ export const Input = React.forwardRef<HTMLInputElement, InputProps>(
                 <input
                     ref={ref}
                     type={resolvedType}
-                    className="flex-1 rounded-lg bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-800"
+                    className="flex-1 rounded-lg bg-transparent px-3 py-2 text-sm text-zinc-900 outline-none placeholder:text-zinc-400 dark:text-zinc-100"
                     {...props}
                 />
 
